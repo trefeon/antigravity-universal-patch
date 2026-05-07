@@ -12,8 +12,8 @@ When connecting to a remote server via SSH Remote, Antigravity installs and runs
 
 | Architecture | Required Feature | Affected CPUs |
 |---|---|---|
-| **ARM64** (aarch64) | LSE Atomics (ARMv8.1+) | Cortex-A53, Cortex-A35, all ARMv8.0 |
-| **x86_64** (amd64) | AES-NI, AVX2, BMI2 | Pre-Haswell Intel, Pre-Excavator AMD |
+| **ARM64** (aarch64) | LSE Atomics, SHA-512 | Cortex-A53, Cortex-A35, all ARMv8.0 |
+| **x86_64** (amd64) | AES-NI, AVX2, FMA, BMI1/2, MOVBE | Pre-Haswell Intel, Pre-Excavator AMD |
 
 ### Error in logs
 ```
@@ -128,8 +128,8 @@ Instead of using a generic `-cpu max` (which emulates everything and wastes CPU)
 
 | Host CPU | QEMU Model | Added Extensions |
 |---|---|---|
-| Westmere (i3-M330) | `Westmere-v2` | `+aes,+avx,+avx2,+bmi2,+pclmulqdq` |
-| Sandy/Ivy Bridge | `SandyBridge-v2` | `+avx2,+bmi2` |
+| Westmere (i3-M330) | `Westmere-v2` | `+aes,+avx,+avx2,+bmi1,+bmi2,+fma,+movbe,+pclmulqdq` |
+| Sandy/Ivy Bridge | `SandyBridge-v2` | `+aes,+avx2,+bmi1,+bmi2,+fma,+movbe` |
 | ARM Cortex-A53 | `max` | Full emulation (different ISA level) |
 
 This reduces TCG translation overhead by **40-60%** compared to `-cpu max` on x86 hosts.
@@ -140,9 +140,8 @@ The wrapper applies several performance optimizations for smooth operation on lo
 
 | Setting | Purpose |
 |---|---|
-| `GOMAXPROCS=1` | Limits Go runtime to 1 thread — AI calls are I/O-bound, not CPU-bound |
-| `nice -n 10` | Lowers QEMU scheduling priority so IDE stays responsive during AI spikes |
-| `-tb-size 512` | Larger QEMU translation block cache — fewer repeated code re-translations |
+| `GOMAXPROCS=1` | Limits Go runtime to 1 thread — reduces synchronization overhead under emulation |
+| `nice -n 10` | Lowers QEMU scheduling priority so the host system stays responsive |
 | `GODEBUG=asyncpreemptoff=1` | Disables Go async preemption that causes deadlocks under QEMU emulation |
 | `MALLOC_ARENA_MAX=2` | Reduces glibc heap fragmentation on low-RAM systems |
 
