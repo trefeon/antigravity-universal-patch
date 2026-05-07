@@ -117,7 +117,7 @@ diagnose_cpu() {
 
         echo ""
         echo "  Feature check:"
-        local required_features=("aes" "avx" "avx2" "bmi2" "pclmulqdq" "popcnt" "sse4_2")
+        local required_features=("aes" "avx" "avx2" "bmi1" "bmi2" "fma" "movbe" "pclmulqdq" "popcnt" "sse4_2")
         flags="$(grep 'flags' /proc/cpuinfo 2>/dev/null | head -1)"
         for feat in "${required_features[@]}"; do
             if echo "$flags" | grep -qw "$feat"; then
@@ -277,7 +277,7 @@ detect_qemu_cpu() {
     local missing_features=""
 
     # Detect missing features that the LS binary requires
-    local required_features=("aes" "avx" "avx2" "bmi2" "pclmulqdq")
+    local required_features=("aes" "avx" "avx2" "bmi1" "bmi2" "fma" "movbe" "pclmulqdq")
     for feat in "${required_features[@]}"; do
         if ! echo "$flags" | grep -qw "$feat"; then
             missing_features="${missing_features},+${feat}"
@@ -317,7 +317,7 @@ export GODEBUG=asyncpreemptoff=1
 export MALLOC_ARENA_MAX=2
 export GOMAXPROCS=1
 # Lower priority + larger translation cache for smoother CPU usage
-exec nice -n 10 $qemu_path -cpu $qemu_cpu -tb-size 512 "\$DIR/language_server_linux_${ls_suffix}.real" "\$@" 2>&1 | grep --line-buffered -v "RAW: rseq" >&2
+exec nice -n 10 $qemu_path -cpu $qemu_cpu "\$DIR/language_server_linux_${ls_suffix}.real" "\$@" 2>&1 | grep --line-buffered -v "RAW: rseq" >&2
 WRAPPER
 }
 
