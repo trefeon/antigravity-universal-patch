@@ -121,9 +121,9 @@ diagnose_cpu() {
         flags="$(grep 'flags' /proc/cpuinfo 2>/dev/null | head -1)"
         for feat in "${required_features[@]}"; do
             if echo "$flags" | grep -qw "$feat"; then
-                echo -e "    $feat: ${GREEN}Ã¢Å“â€œ${NC}"
+                echo -e "    $feat: ${GREEN}✓${NC}"
             else
-                echo -e "    $feat: ${RED}Ã¢Å“â€” MISSING${NC}"
+                echo -e "    $feat: ${RED}✘ MISSING${NC}"
             fi
         done
     elif [ "$ARCH" = "aarch64" ]; then
@@ -137,9 +137,9 @@ diagnose_cpu() {
         features="$(grep 'Features' /proc/cpuinfo 2>/dev/null | head -1)"
         for feat in "${required_features[@]}"; do
             if echo "$features" | grep -qw "$feat"; then
-                echo -e "    $feat: ${GREEN}Ã¢Å“â€œ${NC}"
+                echo -e "    $feat: ${GREEN}✓${NC}"
             else
-                echo -e "    $feat: ${RED}Ã¢Å“â€” MISSING${NC}"
+                echo -e "    $feat: ${RED}✘ MISSING${NC}"
             fi
         done
     fi
@@ -277,7 +277,7 @@ detect_qemu_cpu() {
     local missing_features=""
 
     # Detect missing features that the LS binary requires
-    local required_features=("aes" "avx" "avx2" "bmi1" "bmi2" "fma" "movbe" "pclmulqdq")
+    local required_features=("aes" "avx" "avx2" "bmi1" "bmi2" "fma" "movbe" "pclmulqdq" "popcnt" "sse4_2")
     for feat in "${required_features[@]}"; do
         if ! echo "$flags" | grep -qw "$feat"; then
             missing_features="${missing_features},+${feat}"
@@ -319,7 +319,7 @@ export GOMAXPROCS=1
 # Disable tcache to prevent double-free crashes under emulation
 export GLIBC_TUNABLES=glibc.malloc.tcache_count=0
 # Lower priority + larger translation cache for smoother CPU usage
-exec nice -n 10 $qemu_path -cpu $qemu_cpu "\$DIR/language_server_linux_${ls_suffix}.real" "\$@" 2>&1 | grep --line-buffered -v "RAW: rseq" >&2
+exec nice -n 10 $qemu_path -cpu $qemu_cpu "\$DIR/language_server_linux_${ls_suffix}.real" "\$@" 2> >(grep --line-buffered -v "RAW: rseq" >&2)
 WRAPPER
 }
 
@@ -352,13 +352,21 @@ do_patch() {
         echo ""
         info "Processing: $version_dir"
 
+        local qemu_cpu
+        qemu_cpu="$(detect_qemu_cpu)"
+        info "QEMU CPU model: $qemu_cpu"
+
         # Already patched?
         if [ -f "$ls_real" ]; then
             local size
             size="$(stat -c%s "$ls_bin" 2>/dev/null || echo "999999999")"
             if [ "$size" -lt 1000 ]; then
-                success "Already patched Ã¢â‚¬â€ skipping"
-                skipped=$((skipped + 1))
+                # Already patched, but update the wrapper to ensure latest logic
+                generate_wrapper "$qemu_path" "$LS_SUFFIX" "$qemu_cpu" > "$ls_bin"
+                chmod +x "$ls_bin"
+                chown --reference="$ls_real" "$ls_bin"
+                success "Updated wrapper: $version_dir"
+                patched=$((patched + 1))
                 continue
             fi
         fi
@@ -381,6 +389,7 @@ do_patch() {
         info "QEMU CPU model: $qemu_cpu"
         generate_wrapper "$qemu_path" "$LS_SUFFIX" "$qemu_cpu" > "$ls_bin"
         chmod +x "$ls_bin"
+        chown --reference="$ls_real" "$ls_bin"
 
         # Verify
         local test_output test_exit=0
@@ -512,6 +521,7 @@ do_patch_quiet() {
         qemu_cpu="$(detect_qemu_cpu)"
         generate_wrapper "$qemu_path" "$LS_SUFFIX" "$qemu_cpu" > "$ls_bin"
         chmod +x "$ls_bin"
+        chown --reference="$ls_real" "$ls_bin"
         success "Auto-patched: $version_dir (cpu=$qemu_cpu)"
     done
 }
