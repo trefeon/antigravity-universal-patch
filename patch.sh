@@ -316,6 +316,8 @@ DIR="\$(cd "\$(dirname "\$0")" && pwd)"
 export GODEBUG=asyncpreemptoff=1
 export MALLOC_ARENA_MAX=2
 export GOMAXPROCS=1
+# Disable tcache to prevent double-free crashes under emulation
+export GLIBC_TUNABLES=glibc.malloc.tcache_count=0
 # Lower priority + larger translation cache for smoother CPU usage
 exec nice -n 10 $qemu_path -cpu $qemu_cpu "\$DIR/language_server_linux_${ls_suffix}.real" "\$@" 2>&1 | grep --line-buffered -v "RAW: rseq" >&2
 WRAPPER
