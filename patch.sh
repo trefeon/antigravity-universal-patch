@@ -23,7 +23,7 @@
 set -euo pipefail
 
 # --- Configuration ---
-VERSION="1.4.1"
+VERSION="1.5.0"
 ANTIGRAVITY_DATA_DIR="${ANTIGRAVITY_DATA_DIR:-}"  # Auto-detect if empty
 INSTALL_PATH="/usr/local/bin/antigravity-patch.sh"
 SERVICE_NAME="antigravity-autopatch"
@@ -146,43 +146,46 @@ diagnose_cpu() {
 }
 
 diagnose_ls() {
-    header "Language Server Status"
+    header "Antigravity Components Status"
 
     find_data_dir
-    echo -e "  Data dir: $ANTIGRAVITY_DATA_DIR"
+    info "Scanning: $ANTIGRAVITY_DATA_DIR"
 
     local found=0
-    for bin_dir in "$ANTIGRAVITY_DATA_DIR"/bin/*/extensions/antigravity/bin; do
-        [ -d "$bin_dir" ] || continue
+    # Scan for all ELF binaries and scripts in bin/
+    while IFS= read -r -d '' bin; do
         found=1
+        local rel_path="${bin#$ANTIGRAVITY_DATA_DIR/}"
+        local bin_name
+        bin_name="$(basename "$bin")"
 
-        local ls_bin="$bin_dir/language_server_linux_$LS_SUFFIX"
-        local ls_real="$bin_dir/language_server_linux_$LS_SUFFIX.real"
-        local version_dir
-        version_dir="$(echo "$bin_dir" | grep -oP 'bin/\K[^/]+')"
+        # Skip real backups (they will be reported as part of the patched pair)
+        [[ "$bin_name" == *.real ]] && continue
 
-        echo ""
-        echo -e "  Version: ${BOLD}$version_dir${NC}"
-
-        if [ -f "$ls_real" ]; then
-            echo -e "  Status:  ${GREEN}PATCHED${NC} (QEMU wrapper active)"
-        elif [ -f "$ls_bin" ]; then
-            # Test if binary runs
-            local test_output
-            test_output="$(timeout 3 "$ls_bin" --version 2>&1 || true)"
-            if echo "$test_output" | grep -qi "SIGILL\|Illegal instruction\|FATAL ERROR\|signal 4"; then
-                echo -e "  Status:  ${RED}BROKEN${NC} (SIGILL crash detected)"
-                echo -e "  Error:   $(echo "$test_output" | head -1)"
-            else
-                echo -e "  Status:  ${GREEN}OK${NC} (binary runs natively)"
-            fi
-        else
-            echo -e "  Status:  ${YELLOW}NOT FOUND${NC}"
+        # Check if it's already patched (has a .real companion)
+        if [ -f "${bin}.real" ]; then
+            echo -e "  [${GREEN}PATCHED${NC}]  $rel_path"
+            continue
         fi
-    done
+
+        # Skip if not an ELF binary (we only patch binaries)
+        if ! file "$bin" | grep -q "ELF"; then
+            continue
+        fi
+
+        # Test binary
+        local test_output
+        test_output="$(timeout 2 "$bin" --version 2>&1 || true)"
+        if echo "$test_output" | grep -qi "Illegal instruction\|SIGILL\|compiled with .* enabled"; then
+            echo -e "  [${RED}CRASHING${NC}] $rel_path"
+            echo -e "            Error: $(echo "$test_output" | head -1 | xargs)"
+        else
+            echo -e "  [${GREEN}OK${NC}]       $rel_path"
+        fi
+    done < <(find "$ANTIGRAVITY_DATA_DIR/bin" -type f -executable -print0 2>/dev/null)
 
     if [ "$found" -eq 0 ]; then
-        warn "No Antigravity server installations found in $ANTIGRAVITY_DATA_DIR/bin/"
+        warn "No Antigravity binaries found in $ANTIGRAVITY_DATA_DIR/bin/"
     fi
 }
 
@@ -308,7 +311,7 @@ detect_qemu_cpu() {
 # --- Generate Wrapper Script ---
 generate_wrapper() {
     local qemu_path="$1"
-    local ls_suffix="$2"
+    local bin_real_name="$2"
     local qemu_cpu="$3"
     cat <<WRAPPER
 #!/bin/bash
@@ -319,13 +322,13 @@ export GOMAXPROCS=1
 # Disable tcache to prevent double-free crashes under emulation
 export GLIBC_TUNABLES=glibc.malloc.tcache_count=0
 # Lower priority for smoother CPU usage
-exec nice -n 10 $qemu_path -cpu $qemu_cpu "\$DIR/language_server_linux_${ls_suffix}.real" "\$@" 2> >(grep --line-buffered -v "RAW: rseq" >&2)
+exec nice -n 10 $qemu_path -cpu $qemu_cpu "\$DIR/$bin_real_name" "\$@" 2> >(grep --line-buffered -v "RAW: rseq" >&2)
 WRAPPER
 }
 
 # --- Patch ---
 do_patch() {
-    header "Antigravity SIGILL Patch v${VERSION}"
+    header "Antigravity Universal Patch v${VERSION}"
     echo -e "  Architecture: ${BOLD}$ARCH${NC}"
     echo -e "  QEMU binary:  $QEMU_BIN"
 
@@ -333,7 +336,6 @@ do_patch() {
     echo -e "  Data dir:     $ANTIGRAVITY_DATA_DIR"
 
     install_qemu
-
     local qemu_path
     qemu_path="$(which "$QEMU_BIN")"
 
@@ -341,84 +343,71 @@ do_patch() {
     local skipped=0
     local failed=0
 
-    for bin_dir in "$ANTIGRAVITY_DATA_DIR"/bin/*/extensions/antigravity/bin; do
-        [ -d "$bin_dir" ] || continue
+    info "Scanning for binaries..."
+    while IFS= read -r -d '' bin; do
+        local bin_name
+        bin_name="$(basename "$bin")"
+        local bin_real="${bin}.real"
+        local bin_dir
+        bin_dir="$(dirname "$bin")"
 
-        local ls_bin="$bin_dir/language_server_linux_$LS_SUFFIX"
-        local ls_real="$bin_dir/language_server_linux_$LS_SUFFIX.real"
-        local version_dir
-        version_dir="$(echo "$bin_dir" | grep -oP 'bin/\K[^/]+')"
-
-        echo ""
-        info "Processing: $version_dir"
-
-        local qemu_cpu
-        qemu_cpu="$(detect_qemu_cpu)"
-        info "QEMU CPU model: $qemu_cpu"
+        # Skip real backups
+        [[ "$bin_name" == *.real ]] && continue
 
         # Already patched?
-        if [ -f "$ls_real" ]; then
+        if [ -f "$bin_real" ]; then
             local size
-            size="$(stat -c%s "$ls_bin" 2>/dev/null || echo "999999999")"
+            size="$(stat -c%s "$bin" 2>/dev/null || echo "999999999")"
             if [ "$size" -lt 1000 ]; then
-                # Already patched, but update the wrapper to ensure latest logic
-                generate_wrapper "$qemu_path" "$LS_SUFFIX" "$qemu_cpu" > "$ls_bin"
-                chmod +x "$ls_bin"
-                chown --reference="$ls_real" "$ls_bin"
-                success "Updated wrapper: $version_dir"
-                patched=$((patched + 1))
+                skipped=$((skipped + 1))
                 continue
             fi
         fi
 
-        # Original binary must exist
-        if [ ! -f "$ls_bin" ] && [ ! -f "$ls_real" ]; then
-            warn "No language server binary found Ã¢â‚¬â€ skipping"
+        # Test if it needs patching
+        if ! test_sigill "$bin"; then
             continue
         fi
 
-        # Backup original
-        if [ -f "$ls_bin" ] && [ ! -f "$ls_real" ]; then
-            mv "$ls_bin" "$ls_real"
-            info "Backed up original binary"
-        fi
-
-        # Write wrapper
+        info "Patching: ${bin#$ANTIGRAVITY_DATA_DIR/}"
+        
+        # Backup
+        mv "$bin" "$bin_real"
+        
+        # Generate wrapper
         local qemu_cpu
         qemu_cpu="$(detect_qemu_cpu)"
-        info "QEMU CPU model: $qemu_cpu"
-        generate_wrapper "$qemu_path" "$LS_SUFFIX" "$qemu_cpu" > "$ls_bin"
-        chmod +x "$ls_bin"
-        chown --reference="$ls_real" "$ls_bin"
+        generate_wrapper "$qemu_path" "${bin_name}.real" "$qemu_cpu" > "$bin"
+        chmod +x "$bin"
+        chown --reference="$bin_real" "$bin"
 
         # Verify
-        local test_output test_exit=0
-        test_output="$(timeout 5 "$ls_bin" --version 2>&1)" || test_exit=$?
-        if echo "$test_output" | grep -qi "Illegal instruction"; then
-            error "Patch verification FAILED Ã¢â‚¬â€ still getting SIGILL"
-            # Restore original
-            mv "$ls_real" "$ls_bin"
+        if test_sigill "$bin"; then
+            error "Patch verification FAILED"
+            mv "$bin_real" "$bin"
             failed=$((failed + 1))
         else
             success "Patched successfully"
             patched=$((patched + 1))
         fi
-    done
+    done < <(find "$ANTIGRAVITY_DATA_DIR/bin" -type f -executable -exec sh -c 'file "$1" | grep -q "ELF"' _ {} \; -print0 2>/dev/null)
 
     header "Results"
     echo -e "  Patched:  ${GREEN}$patched${NC}"
-    echo -e "  Skipped:  ${YELLOW}$skipped${NC} (already patched)"
+    echo -e "  Skipped:  ${YELLOW}$skipped${NC} (already patched/OK)"
     [ "$failed" -gt 0 ] && echo -e "  Failed:   ${RED}$failed${NC}"
-    echo ""
+    
+    [ "$patched" -gt 0 ] && success "Done! Reconnect to activate."
+}
 
-    if [ "$patched" -gt 0 ] || [ "$skipped" -gt 0 ]; then
-        success "Done! Reconnect from the IDE to activate the fix."
-    elif [ "$failed" -gt 0 ]; then
-        error "Patching failed. Please open an issue with your CPU info."
-        exit 1
-    else
-        warn "No installations found to patch."
+test_sigill() {
+    local bin="$1"
+    local test_output
+    test_output="$(timeout 2 "$bin" --version 2>&1 || true)"
+    if echo "$test_output" | grep -qi "Illegal instruction\|SIGILL\|compiled with .* enabled"; then
+        return 0 # True, it crashes
     fi
+    return 1 # False, it seems OK
 }
 
 # --- Restore ---

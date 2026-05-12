@@ -4,25 +4,27 @@
 
 Antigravity (Google's VS Code fork) ships a language server binary compiled for modern CPUs. On older processors that lack certain instruction set extensions, the binary crashes immediately with `SIGILL` (Illegal Instruction), breaking all AI features (code completion, chat, inline suggestions).
 
-This project provides a **zero-config, one-command fix** using QEMU user-mode emulation to transparently run the binary with full CPU feature emulation.
+This project provides a **zero-config, universal fix** using QEMU user-mode emulation to transparently run binaries with full CPU feature emulation. Version 1.5.0 introduces **Smart Binary Discovery**, automatically protecting *all* Antigravity components, not just the language server.
 
 ## 🔴 The Problem
 
 When connecting to a remote server via SSH Remote, Antigravity installs and runs a language server binary. This binary is compiled with CPU features that older processors don't support:
 
 | Architecture | Required Feature | Affected CPUs |
-|---|---|---|
+| --- | --- | --- |
 | **ARM64** (aarch64) | LSE Atomics, SHA-512 | Cortex-A53, Cortex-A35, all ARMv8.0 |
 | **x86_64** (amd64) | AES-NI, AVX2, FMA, BMI1/2, MOVBE | Pre-Haswell Intel, Pre-Excavator AMD |
 
 ### Error in logs
-```
+
+```text
 (Antigravity) Language server killed with signal SIGILL
 (Antigravity) Failed to start language server: Error: Language server exited before sending start data
 ```
 
 Or on x86:
-```
+
+```text
 FATAL ERROR: This binary was compiled with aes enabled, but this feature is not available on this processor
 ```
 
@@ -31,14 +33,17 @@ FATAL ERROR: This binary was compiled with aes enabled, but this feature is not 
 We use **QEMU user-mode emulation** to wrap the language server binary. QEMU emulates the host CPU microarchitecture with only the missing instruction sets added, minimizing emulation overhead.
 
 ### How it works
-1. The original binary is renamed to `language_server_linux_*.real`
-2. A tiny bash wrapper takes its place
-3. The wrapper runs the real binary through QEMU with host-matched CPU emulation
-4. Antigravity sees no difference — the fix is completely transparent
+
+1. **Dynamic Discovery**: The script recursively scans your Antigravity installation for ELF binaries.
+2. **Smart Detection**: It tests each binary to see if it actually crashes with `SIGILL` on your hardware.
+3. **Transparent Wrapping**: Crashing binaries are moved to `*.real` and replaced by a tiny bash wrapper.
+4. **Emulated Execution**: The wrapper runs the real binary through QEMU with host-matched CPU emulation.
+5. **Universal Compatibility**: Antigravity sees no difference — any component (language server, search tools, etc.) is protected.
 
 ## 🚀 Quick Start
 
 ### One-liner (run on your LOCAL machine)
+
 ```bash
 # For a remote server accessible via SSH:
 cat patch.sh | ssh user@your-server "bash -s"
@@ -48,6 +53,7 @@ type patch.sh | ssh user@your-server "tr -d '\r' | bash -s"
 ```
 
 ### Direct on the server
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/trefeon/antigravity-universal-patch/main/patch.sh | bash
 # or
@@ -55,6 +61,7 @@ wget -qO- https://raw.githubusercontent.com/trefeon/antigravity-universal-patch/
 ```
 
 ### Manual
+
 ```bash
 git clone https://github.com/trefeon/antigravity-universal-patch.git
 cd antigravity-universal-patch
@@ -71,27 +78,32 @@ chmod +x patch.sh
 ## ⚙️ Advanced Usage
 
 ### Diagnose without patching
+
 ```bash
 ./patch.sh --diagnose
 ```
 
 ### Unpatch (restore original binary)
+
 ```bash
 ./patch.sh --restore
 ```
 
 ### Install auto-patch service (persistent)
+
 ```bash
 sudo ./patch.sh --install
 ```
-This installs a systemd service that watches for Antigravity updates and automatically re-patches new binaries using `inotifywait`. No more manual re-patching after updates.
+This installs a systemd service that watches for Antigravity updates and automatically re-patches new binaries using `inotifywait`. It now monitors the entire installation root, providing **hands-off, long-term protection** for all current and future binaries.
 
 ### Uninstall auto-patch service
+
 ```bash
 sudo ./patch.sh --uninstall
 ```
 
 ### Patch specific server data directory
+
 ```bash
 ANTIGRAVITY_DATA_DIR=/custom/path ./patch.sh
 ```
@@ -109,7 +121,7 @@ cat patch.sh | ssh user@your-server "bash -s"
 ## 🧪 Tested On
 
 | Device | CPU | Architecture | Status |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | Amlogic S9xx Box | Cortex-A53 (ARMv8.0) | aarch64 | ✅ Working |
 | Acer Laptop | Intel i3-2330M (Sandy Bridge) | x86_64 | ✅ Working |
 | Acer Laptop | Intel i3-M330 (Westmere) | x86_64 | ✅ Working |
@@ -127,29 +139,31 @@ QEMU user-mode emulation translates CPU instructions at runtime. When running on
 Instead of using a generic `-cpu max` (which emulates everything and wastes CPU), the patch **detects the host CPU microarchitecture** and selects the closest QEMU model, adding only the missing instruction sets:
 
 | Host CPU | QEMU Model | Added Extensions |
-|---|---|---|
+| --- | --- | --- |
 | Westmere (i3-M330) | `Westmere-v2` | `+aes,+avx,+avx2,+bmi1,+bmi2,+fma,+movbe,+pclmulqdq` |
 | Sandy/Ivy Bridge | `SandyBridge-v2` | `+aes,+avx2,+bmi1,+bmi2,+fma,+movbe` |
 | ARM Cortex-A53 | `max` | Full emulation (different ISA level) |
 
 This reduces TCG translation overhead by **40-60%** compared to `-cpu max` on x86 hosts.
 
-### Performance Tuning (v1.4.0)
+### Performance Tuning (v1.5.0)
 
 The wrapper applies several performance optimizations for smooth operation on low-resource hardware:
 
 | Setting | Purpose |
-|---|---|
+| --- | --- | --- |
 | `GOMAXPROCS=1` | Limits Go runtime to 1 thread — reduces synchronization overhead under emulation |
 | `nice -n 10` | Lowers QEMU scheduling priority so the host system stays responsive |
 | `GODEBUG=asyncpreemptoff=1` | Disables Go async preemption that causes deadlocks under QEMU emulation |
 | `MALLOC_ARENA_MAX=2` | Reduces glibc heap fragmentation on low-RAM systems |
 
 ### Additional Fixes
+
 - **Thread Hang Fix**: Go binaries compiled for newer systems heavily utilize asynchronous preemption for their garbage collectors. QEMU user-mode emulation struggles translating these rapid signal interruptions, leading to deadlocks/hanging. The `GODEBUG=asyncpreemptoff=1` flag ensures the language server runs rock-solid under emulation.
 - **Log Noise Suppression**: Under QEMU emulation, Google's TCMalloc/Abseil will trip up on the `rseq` (Restartable Sequences) syscall and spam the IDE logs with harmless but confusing warnings. The wrapper filters these out (`grep -v`) for a clean experience.
 
 ### Performance Impact
+
 The language server runs under partial emulation, so there's a ~1.5-3x CPU overhead (reduced from ~2-4x with the generic `-cpu max` approach). Since the LS is primarily I/O-bound (waiting for API responses, processing text), the impact on real-world usage is **minimal and imperceptible** for most workflows. Idle CPU usage is typically **4-8%**.
 
 ## 📄 License
