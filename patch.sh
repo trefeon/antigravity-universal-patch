@@ -23,7 +23,7 @@
 set -euo pipefail
 
 # --- Configuration ---
-VERSION="1.5.0"
+VERSION="1.5.1"
 ANTIGRAVITY_DATA_DIR="${ANTIGRAVITY_DATA_DIR:-}"  # Auto-detect if empty
 INSTALL_PATH="/usr/local/bin/antigravity-patch.sh"
 SERVICE_NAME="antigravity-autopatch"
@@ -182,7 +182,7 @@ diagnose_ls() {
         else
             echo -e "  [${GREEN}OK${NC}]       $rel_path"
         fi
-    done < <(find "$ANTIGRAVITY_DATA_DIR/bin" -type f -executable -print0 2>/dev/null)
+    done < <(find "$ANTIGRAVITY_DATA_DIR/bin" -type f -executable \( -name "*language_server*" -o -name "*antigravity*" \) -print0 2>/dev/null)
 
     if [ "$found" -eq 0 ]; then
         warn "No Antigravity binaries found in $ANTIGRAVITY_DATA_DIR/bin/"
@@ -390,7 +390,7 @@ do_patch() {
             success "Patched successfully"
             patched=$((patched + 1))
         fi
-    done < <(find "$ANTIGRAVITY_DATA_DIR/bin" -type f -executable -exec sh -c 'file "$1" | grep -q "ELF"' _ {} \; -print0 2>/dev/null)
+    done < <(find "$ANTIGRAVITY_DATA_DIR/bin" -type f -executable \( -name "*language_server*" -o -name "*antigravity*" \) -exec sh -c 'file "$1" | grep -q "ELF"' _ {} \; -print0 2>/dev/null)
 
     header "Results"
     echo -e "  Patched:  ${GREEN}$patched${NC}"
@@ -417,18 +417,14 @@ do_restore() {
     find_data_dir
 
     local restored=0
-    for bin_dir in "$ANTIGRAVITY_DATA_DIR"/bin/*/extensions/antigravity/bin; do
-        [ -d "$bin_dir" ] || continue
-
-        local ls_bin="$bin_dir/language_server_linux_$LS_SUFFIX"
-        local ls_real="$bin_dir/language_server_linux_$LS_SUFFIX.real"
-
-        if [ -f "$ls_real" ]; then
-            mv -f "$ls_real" "$ls_bin"
-            success "Restored: $(basename "$(dirname "$(dirname "$(dirname "$bin_dir")")")")"
+    while IFS= read -r -d '' bin_real; do
+        local bin="${bin_real%.real}"
+        if [ -f "$bin_real" ]; then
+            mv -f "$bin_real" "$bin"
+            success "Restored: ${bin#$ANTIGRAVITY_DATA_DIR/}"
             restored=$((restored + 1))
         fi
-    done
+    done < <(find "$ANTIGRAVITY_DATA_DIR/bin" -type f -name "*.real" -print0 2>/dev/null)
 
     if [ "$restored" -eq 0 ]; then
         info "Nothing to restore."
