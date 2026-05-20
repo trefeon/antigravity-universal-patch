@@ -4,7 +4,7 @@
 
 Antigravity (Google's VS Code fork) ships a language server binary compiled for modern CPUs. On older processors that lack certain instruction set extensions, the binary crashes immediately with `SIGILL` (Illegal Instruction), breaking all AI features (code completion, chat, inline suggestions).
 
-This project provides a **zero-config, universal fix** using QEMU user-mode emulation to transparently run binaries with full CPU feature emulation. Version 1.5.0 introduces **Smart Binary Discovery**, automatically protecting *all* Antigravity components, not just the language server.
+This project provides a **zero-config, universal fix** using QEMU user-mode emulation to transparently run binaries with full CPU feature emulation. Version 1.6.0 introduces **Multi-Directory Discovery**, automatically detecting both `~/.antigravity-server` (classic) and `~/.antigravity-ide-server` (v2.0+) installations — the auto-patch watcher monitors all discovered directories simultaneously.
 
 ## 🔴 The Problem
 

@@ -23,7 +23,7 @@
 set -euo pipefail
 
 # --- Configuration ---
-VERSION="1.5.1"
+VERSION="1.6.0"
 ANTIGRAVITY_DATA_DIR="${ANTIGRAVITY_DATA_DIR:-}"  # Auto-detect if empty
 INSTALL_PATH="/usr/local/bin/antigravity-patch.sh"
 SERVICE_NAME="antigravity-autopatch"
@@ -66,7 +66,13 @@ detect_arch() {
     esac
 }
 
-# --- Find Antigravity Data Directory ---
+# --- Directory name patterns (old + new branding) ---
+ANTIGRAVITY_DIR_NAMES=(
+    ".antigravity-server"
+    ".antigravity-ide-server"
+)
+
+# --- Find first Antigravity Data Directory (for single-dir operations) ---
 find_data_dir() {
     if [ -n "$ANTIGRAVITY_DATA_DIR" ]; then
         if [ -d "$ANTIGRAVITY_DATA_DIR" ]; then
@@ -77,19 +83,8 @@ find_data_dir() {
         fi
     fi
 
-    # Search common locations
-    local home="${HOME:-/root}"
-    local candidates=(
-        "$home/.antigravity-server"
-        "/root/.antigravity-server"
-    )
-
-    # Also check all home directories
-    if [ -d /home ]; then
-        for homedir in /home/*/; do
-            candidates+=("${homedir}.antigravity-server")
-        done
-    fi
+    local -a candidates=()
+    _build_candidates candidates
 
     for dir in "${candidates[@]}"; do
         if [ -d "$dir/bin" ]; then
@@ -102,6 +97,53 @@ find_data_dir() {
     echo "  Searched: ${candidates[*]}"
     echo "  Set ANTIGRAVITY_DATA_DIR environment variable to specify the path manually."
     exit 1
+}
+
+# --- Find ALL Antigravity Data Directories (for watch/patch-all operations) ---
+# Populates ALL_DATA_DIRS array
+find_all_data_dirs() {
+    ALL_DATA_DIRS=()
+
+    if [ -n "$ANTIGRAVITY_DATA_DIR" ]; then
+        if [ -d "$ANTIGRAVITY_DATA_DIR" ]; then
+            ALL_DATA_DIRS=("$ANTIGRAVITY_DATA_DIR")
+            return 0
+        fi
+    fi
+
+    local -a candidates=()
+    _build_candidates candidates
+
+    for dir in "${candidates[@]}"; do
+        if [ -d "$dir/bin" ]; then
+            ALL_DATA_DIRS+=("$dir")
+        fi
+    done
+
+    if [ ${#ALL_DATA_DIRS[@]} -eq 0 ]; then
+        error "Could not find any Antigravity server installation."
+        echo "  Searched: ${candidates[*]}"
+        exit 1
+    fi
+}
+
+# --- Build candidate directory list ---
+_build_candidates() {
+    local -n _out=$1
+    local home="${HOME:-/root}"
+
+    for name in "${ANTIGRAVITY_DIR_NAMES[@]}"; do
+        _out+=("$home/$name")
+        [ "$home" != "/root" ] && _out+=("/root/$name")
+    done
+
+    if [ -d /home ]; then
+        for homedir in /home/*/; do
+            for name in "${ANTIGRAVITY_DIR_NAMES[@]}"; do
+                _out+=("${homedir}$name")
+            done
+        done
+    fi
 }
 
 # --- CPU Diagnosis ---
@@ -146,46 +188,34 @@ diagnose_cpu() {
 }
 
 diagnose_ls() {
-    header "Antigravity Components Status"
+    header "Antigravity Language Server Status"
 
     find_data_dir
-    info "Scanning: $ANTIGRAVITY_DATA_DIR"
+    info "Data dir: $ANTIGRAVITY_DATA_DIR"
 
     local found=0
-    # Scan for all ELF binaries and scripts in bin/
-    while IFS= read -r -d '' bin; do
+    for ls_bin in "$ANTIGRAVITY_DATA_DIR"/bin/*/extensions/antigravity/bin/language_server_linux_"$LS_SUFFIX"; do
+        [ -f "$ls_bin" ] || [ -f "${ls_bin}.real" ] || continue
         found=1
-        local rel_path="${bin#$ANTIGRAVITY_DATA_DIR/}"
-        local bin_name
-        bin_name="$(basename "$bin")"
+        local rel_path="${ls_bin#$ANTIGRAVITY_DATA_DIR/}"
 
-        # Skip real backups (they will be reported as part of the patched pair)
-        [[ "$bin_name" == *.real ]] && continue
-
-        # Check if it's already patched (has a .real companion)
-        if [ -f "${bin}.real" ]; then
-            echo -e "  [${GREEN}PATCHED${NC}]  $rel_path"
-            continue
-        fi
-
-        # Skip if not an ELF binary (we only patch binaries)
-        if ! file "$bin" | grep -q "ELF"; then
-            continue
-        fi
-
-        # Test binary
-        local test_output
-        test_output="$(timeout 2 "$bin" --version 2>&1 || true)"
-        if echo "$test_output" | grep -qi "Illegal instruction\|SIGILL\|compiled with .* enabled"; then
-            echo -e "  [${RED}CRASHING${NC}] $rel_path"
-            echo -e "            Error: $(echo "$test_output" | head -1 | xargs)"
+        if [ -f "${ls_bin}.real" ]; then
+            local size
+            size="$(stat -c%s "$ls_bin" 2>/dev/null || echo "999999999")"
+            if [ "$size" -lt 1000 ]; then
+                echo -e "  [${GREEN}PATCHED${NC}]  $rel_path"
+            else
+                echo -e "  [${YELLOW}STALE${NC}]    $rel_path (wrapper replaced by update)"
+            fi
+        elif file "$ls_bin" | grep -q "ELF"; then
+            echo -e "  [${RED}UNPATCHED${NC}] $rel_path"
         else
             echo -e "  [${GREEN}OK${NC}]       $rel_path"
         fi
-    done < <(find "$ANTIGRAVITY_DATA_DIR/bin" -type f -executable \( -name "*language_server*" -o -name "*antigravity*" \) -print0 2>/dev/null)
+    done
 
     if [ "$found" -eq 0 ]; then
-        warn "No Antigravity binaries found in $ANTIGRAVITY_DATA_DIR/bin/"
+        warn "No language server binary found in $ANTIGRAVITY_DATA_DIR/bin/"
     fi
 }
 
@@ -342,72 +372,59 @@ do_patch() {
     local patched=0
     local skipped=0
     local failed=0
+    local ls_name="language_server_linux_$LS_SUFFIX"
 
-    info "Scanning for binaries..."
-    while IFS= read -r -d '' bin; do
-        local bin_name
-        bin_name="$(basename "$bin")"
-        local bin_real="${bin}.real"
-        local bin_dir
-        bin_dir="$(dirname "$bin")"
-
-        # Skip real backups
-        [[ "$bin_name" == *.real ]] && continue
+    info "Scanning for language server binaries..."
+    for ls_bin in "$ANTIGRAVITY_DATA_DIR"/bin/*/extensions/antigravity/bin/"$ls_name"; do
+        [ -f "$ls_bin" ] || [ -f "${ls_bin}.real" ] || continue
+        local ls_real="${ls_bin}.real"
 
         # Already patched?
-        if [ -f "$bin_real" ]; then
+        if [ -f "$ls_real" ]; then
             local size
-            size="$(stat -c%s "$bin" 2>/dev/null || echo "999999999")"
+            size="$(stat -c%s "$ls_bin" 2>/dev/null || echo "999999999")"
             if [ "$size" -lt 1000 ]; then
                 skipped=$((skipped + 1))
                 continue
             fi
         fi
 
-        # Test if it needs patching
-        if ! test_sigill "$bin"; then
+        # Skip if not an ELF binary (already a script/wrapper)
+        if ! file "$ls_bin" | grep -q "ELF"; then
             continue
         fi
 
-        info "Patching: ${bin#$ANTIGRAVITY_DATA_DIR/}"
-        
-        # Backup
-        mv "$bin" "$bin_real"
-        
+        info "Patching: ${ls_bin#$ANTIGRAVITY_DATA_DIR/}"
+
+        # Backup original
+        mv "$ls_bin" "$ls_real"
+
         # Generate wrapper
         local qemu_cpu
         qemu_cpu="$(detect_qemu_cpu)"
-        generate_wrapper "$qemu_path" "${bin_name}.real" "$qemu_cpu" > "$bin"
-        chmod +x "$bin"
-        chown --reference="$bin_real" "$bin"
+        generate_wrapper "$qemu_path" "${ls_name}.real" "$qemu_cpu" > "$ls_bin"
+        chmod +x "$ls_bin"
+        chown --reference="$ls_real" "$ls_bin"
 
-        # Verify
-        if test_sigill "$bin"; then
+        # Verify wrapper runs without SIGILL
+        local test_output
+        test_output="$(timeout 5 "$ls_bin" --version 2>&1 || true)"
+        if echo "$test_output" | grep -qi "Illegal instruction\|SIGILL\|compiled with .* enabled"; then
             error "Patch verification FAILED"
-            mv "$bin_real" "$bin"
+            mv "$ls_real" "$ls_bin"
             failed=$((failed + 1))
         else
             success "Patched successfully"
             patched=$((patched + 1))
         fi
-    done < <(find "$ANTIGRAVITY_DATA_DIR/bin" -type f -executable \( -name "*language_server*" -o -name "*antigravity*" \) -exec sh -c 'file "$1" | grep -q "ELF"' _ {} \; -print0 2>/dev/null)
+    done
 
     header "Results"
     echo -e "  Patched:  ${GREEN}$patched${NC}"
     echo -e "  Skipped:  ${YELLOW}$skipped${NC} (already patched/OK)"
     [ "$failed" -gt 0 ] && echo -e "  Failed:   ${RED}$failed${NC}"
-    
-    [ "$patched" -gt 0 ] && success "Done! Reconnect to activate."
-}
 
-test_sigill() {
-    local bin="$1"
-    local test_output
-    test_output="$(timeout 2 "$bin" --version 2>&1 || true)"
-    if echo "$test_output" | grep -qi "Illegal instruction\|SIGILL\|compiled with .* enabled"; then
-        return 0 # True, it crashes
-    fi
-    return 1 # False, it seems OK
+    [ "$patched" -gt 0 ] && success "Done! Reconnect to activate."
 }
 
 # --- Restore ---
@@ -417,14 +434,14 @@ do_restore() {
     find_data_dir
 
     local restored=0
-    while IFS= read -r -d '' bin_real; do
-        local bin="${bin_real%.real}"
-        if [ -f "$bin_real" ]; then
-            mv -f "$bin_real" "$bin"
-            success "Restored: ${bin#$ANTIGRAVITY_DATA_DIR/}"
-            restored=$((restored + 1))
-        fi
-    done < <(find "$ANTIGRAVITY_DATA_DIR/bin" -type f -name "*.real" -print0 2>/dev/null)
+    local ls_name="language_server_linux_$LS_SUFFIX"
+    for ls_real in "$ANTIGRAVITY_DATA_DIR"/bin/*/extensions/antigravity/bin/"${ls_name}.real"; do
+        [ -f "$ls_real" ] || continue
+        local ls_bin="${ls_real%.real}"
+        mv -f "$ls_real" "$ls_bin"
+        success "Restored: ${ls_bin#$ANTIGRAVITY_DATA_DIR/}"
+        restored=$((restored + 1))
+    done
 
     if [ "$restored" -eq 0 ]; then
         info "Nothing to restore."
@@ -435,40 +452,53 @@ do_restore() {
 
 # --- Watch Mode (persistent background daemon) ---
 do_watch() {
-    header "Antigravity Auto-Patcher v${VERSION} Ã¢â‚¬â€ Watch Mode"
+    header "Antigravity Auto-Patcher v${VERSION} — Watch Mode"
 
-    find_data_dir
+    find_all_data_dirs
     install_qemu
 
-    local watch_dir="$ANTIGRAVITY_DATA_DIR/bin"
-    info "Watching: $watch_dir"
+    # Build list of watch directories
+    local watch_dirs=()
+    for ddir in "${ALL_DATA_DIRS[@]}"; do
+        if [ -d "$ddir/bin" ]; then
+            watch_dirs+=("$ddir/bin")
+            info "Watching: $ddir/bin"
+        fi
+    done
+
     info "Architecture: $ARCH"
 
     # Patch anything unpatched right now
-    do_patch_quiet
+    do_patch_quiet_all
 
     # Prefer inotifywait for instant detection, fall back to polling
     if command -v inotifywait &>/dev/null; then
         info "Using inotifywait (real-time detection)"
-        # Watch for new files/dirs created under bin/
-        # -m = monitor (don't exit), -r = recursive, -q = quiet
-        inotifywait -m -r -q -e create,moved_to "$watch_dir" 2>/dev/null |
+        inotifywait -m -r -q -e create,moved_to "${watch_dirs[@]}" 2>/dev/null |
         while read -r dir event file; do
-            # Trigger on language_server binary or new version directory
+            # Only react to language server binaries or new version directories
             if [[ "$file" == language_server_linux_* ]] || [[ "$event" == *ISDIR* ]]; then
-                # Debounce Ã¢â‚¬â€ let Antigravity finish writing all files
                 sleep 8
-                do_patch_quiet
+                do_patch_quiet_all
             fi
         done
     else
-        warn "inotifywait not found Ã¢â‚¬â€ using 30s polling fallback"
+        warn "inotifywait not found — using 60s polling fallback"
         warn "Install inotify-tools for instant detection"
         while true; do
-            sleep 30
-            do_patch_quiet
+            sleep 60
+            find_all_data_dirs 2>/dev/null || true
+            do_patch_quiet_all
         done
     fi
+}
+
+# --- Quiet patch for all discovered directories ---
+do_patch_quiet_all() {
+    for ddir in "${ALL_DATA_DIRS[@]}"; do
+        ANTIGRAVITY_DATA_DIR="$ddir"
+        do_patch_quiet
+    done
 }
 
 # --- Quiet patch (for watch/daemon mode) ---
@@ -483,20 +513,20 @@ do_patch_quiet() {
         local ls_bin="$bin_dir/language_server_linux_$LS_SUFFIX"
         local ls_real="$bin_dir/language_server_linux_$LS_SUFFIX.real"
 
-        # Already patched Ã¢â‚¬â€ skip silently
+        # Already patched — skip silently
         if [ -f "$ls_real" ]; then
             local size
             size="$(stat -c%s "$ls_bin" 2>/dev/null || echo "999999999")"
             [ "$size" -lt 1000 ] && continue
         fi
 
-        # No binary Ã¢â‚¬â€ skip
+        # No binary — skip
         [ -f "$ls_bin" ] || [ -f "$ls_real" ] || continue
 
         # Needs patching
         local version_dir
         version_dir="$(echo "$bin_dir" | grep -oP 'bin/\K[^/]+')"
-        info "New binary detected Ã¢â‚¬â€ patching: $version_dir"
+        info "New binary detected — patching: $version_dir"
 
         if [ -f "$ls_bin" ] && [ ! -f "$ls_real" ]; then
             mv "$ls_bin" "$ls_real"
@@ -504,7 +534,7 @@ do_patch_quiet() {
 
         local qemu_cpu
         qemu_cpu="$(detect_qemu_cpu)"
-        generate_wrapper "$qemu_path" "$LS_SUFFIX" "$qemu_cpu" > "$ls_bin"
+        generate_wrapper "$qemu_path" "language_server_linux_$LS_SUFFIX.real" "$qemu_cpu" > "$ls_bin"
         chmod +x "$ls_bin"
         chown --reference="$ls_real" "$ls_bin"
         success "Auto-patched: $version_dir (cpu=$qemu_cpu)"
@@ -547,7 +577,7 @@ do_install() {
         if command -v inotifywait &>/dev/null; then
             success "inotify-tools installed"
         else
-            warn "inotify-tools not available Ã¢â‚¬â€ will use 30s polling fallback"
+            warn "inotify-tools not available — will use 30s polling fallback"
         fi
     else
         success "inotify-tools already installed"
